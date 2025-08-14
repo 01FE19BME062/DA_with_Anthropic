@@ -435,24 +435,24 @@ async def ping_open_ai_5(question_text, relevant_context="", max_tries=3):
 
 
 async def ping_claude(question_text, relevant_context="", max_tries=3, timeout_seconds=180):
-    """Call Anthropic Claude API (claude-3-5-sonnet-20241022) with timeout and OpenAI fallback."""
+    """Call Anthropic Claude API (claude-sonnet-4-20250514) with timeout and OpenAI fallback."""
     
     async def claude_request():
         tries = 0
         while tries < max_tries:
             try:
-                print(f"Claude Sonnet 3.5 is running {tries+1} try")
+                print(f"Claude Sonnet 4 is running {tries+1} try")
                 headers = {
                     "x-api-key": claude_api_key,
                     "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01"
+                    "anthropic-version": "claude-sonnet-4-20250514"
                 }
                 
                 # Format messages for Claude API
                 user_content = f"{relevant_context}\n\n{question_text}" if relevant_context else question_text
                 
                 payload = {
-                    "model": "claude-3-5-sonnet-20241022",
+                    "model": "claude-sonnet-4-20250514",
                     "max_tokens": 4000,
                     "messages": [
                         {"role": "user", "content": user_content}
@@ -468,7 +468,7 @@ async def ping_claude(question_text, relevant_context="", max_tries=3, timeout_s
                         content = claude_response["content"][0]["text"]
                         return {
                             "choices": [{"message": {"content": content}}],
-                            "model": "claude-3-5-sonnet-20241022",
+                            "model": "claude-sonnet-4-20250514",
                             "_source": "claude"
                         }
                     else:
