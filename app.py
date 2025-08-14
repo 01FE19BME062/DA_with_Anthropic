@@ -445,7 +445,7 @@ async def ping_claude(question_text, relevant_context="", max_tries=3, timeout_s
                 headers = {
                     "x-api-key": claude_api_key,
                     "Content-Type": "application/json",
-                    "anthropic-version": "claude-sonnet-4-20250514"
+                    "anthropic-version": "2023-06-01"  # Fixed: Use API version, not model name
                 }
                 
                 # Format messages for Claude API
@@ -460,7 +460,11 @@ async def ping_claude(question_text, relevant_context="", max_tries=3, timeout_s
                 }
                 
                 async with httpx.AsyncClient(timeout=120) as client:
-                    response = await client.post(claude_api_url, headers=headers, json=payload)
+                    response = await client.post(
+                        "https://api.anthropic.com/v1/messages",  # Fixed: Use correct endpoint
+                        headers=headers, 
+                        json=payload
+                    )
                     
                     if response.status_code == 200:
                         claude_response = response.json()
