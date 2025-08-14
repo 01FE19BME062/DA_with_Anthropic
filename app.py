@@ -26,6 +26,7 @@ import tarfile
 import zipfile
 import tempfile
 import shutil
+import asyncio
 
 import pdfplumber
 import openpyxl
@@ -91,6 +92,10 @@ grok_api = os.getenv("grok_api")
 grok_fix_api = os.getenv("grok_fix_api")
 openai_gpt5_api_key = os.getenv("OPENAI_GPT5_API_KEY")
 openai_gpt5_url = "https://api.openai.com/v1/chat/completions"
+
+# Claude API configuration
+claude_api_key = os.getenv("CLAUDE_API_KEY")
+claude_api_url = "https://api.anthropic.com/v1/messages"
 
 def make_json_serializable(obj):
     """Convert pandas/numpy objects to JSON-serializable formats"""
@@ -427,6 +432,94 @@ async def ping_open_ai_5(question_text, relevant_context="", max_tries=3):
             else:
                 print(f"All {max_tries} attempts failed for OpenAI GPT-5, falling back to ChatGPT...")
                 return await ping_chatgpt(question_text, relevant_context)
+
+
+async def ping_claude(question_text, relevant_context="", max_tries=3, timeout_seconds=180):
+    """Call Anthropic Claude API (claude-3-5-sonnet-20241022) with timeout and OpenAI fallback."""
+    
+    async def claude_request():
+        tries = 0
+        while tries < max_tries:
+            try:
+                print(f"Claude Sonnet 3.5 is running {tries+1} try")
+                headers = {
+                    "x-api-key": claude_api_key,
+                    "Content-Type": "application/json",
+                    "anthropic-version": "2023-06-01"
+                }
+                
+                # Format messages for Claude API
+                user_content = f"{relevant_context}\n\n{question_text}" if relevant_context else question_text
+                
+                payload = {
+                    "model": "claude-3-5-sonnet-20241022",
+                    "max_tokens": 4000,
+                    "messages": [
+                        {"role": "user", "content": user_content}
+                    ]
+                }
+                
+                async with httpx.AsyncClient(timeout=120) as client:
+                    response = await client.post(claude_api_url, headers=headers, json=payload)
+                    
+                    if response.status_code == 200:
+                        claude_response = response.json()
+                        # Convert Claude response format to OpenAI-compatible format
+                        content = claude_response["content"][0]["text"]
+                        return {
+                            "choices": [{"message": {"content": content}}],
+                            "model": "claude-3-5-sonnet-20241022",
+                            "_source": "claude"
+                        }
+                    else:
+                        print(f"Claude API error: {response.status_code} - {response.text}")
+                        if response.status_code >= 500:  # Server errors, retry
+                            raise Exception(f"Server error {response.status_code}: {response.text}")
+                        else:  # Client errors, don't retry
+                            return {"error": f"Client error {response.status_code}: {response.text}"}
+                            
+            except Exception as e:
+                print(f"Error in Claude API call (attempt {tries + 1}): {e}")
+                tries += 1
+                if tries < max_tries:
+                    print(f"Retrying... ({max_tries - tries} attempts remaining)")
+                else:
+                    print(f"All {max_tries} attempts failed for Claude")
+                    raise e
+    
+    try:
+        # Run Claude request with timeout
+        return await asyncio.wait_for(claude_request(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        print(f"Claude API timed out after {timeout_seconds} seconds, falling back to OpenAI GPT-5...")
+        return await ping_open_ai_5(question_text, relevant_context)
+    except Exception as e:
+        print(f"Claude API completely failed: {e}, falling back to OpenAI GPT-5...")
+        return await ping_open_ai_5(question_text, relevant_context)
+
+
+def extract_content_from_response(response):
+    """Extract content from either Claude or OpenAI response format safely."""
+    try:
+        # Check if it's an error response
+        if "error" in response:
+            return None
+            
+        # Standard OpenAI/Claude compatible format
+        if "choices" in response and len(response["choices"]) > 0:
+            return response["choices"][0]["message"]["content"]
+            
+        # Direct content (fallback)
+        if "content" in response:
+            if isinstance(response["content"], list) and len(response["content"]) > 0:
+                return response["content"][0].get("text", "")
+            elif isinstance(response["content"], str):
+                return response["content"]
+                
+        return None
+    except Exception as e:
+        print(f"Error extracting content from response: {e}")
+        return None
 
 
 
@@ -3143,9 +3236,17 @@ async def aianalyst(request: Request):
     try:
         # raw_code =  await ping_gemini_pro(context, "You are a great Python code developer. JUST GIVE CODE NO EXPLANATIONS.REMEMBER: ONLY GIVE THE ANSWERS TO WHAT IS ASKED - NO EXTRA DATA NO EXTRA ANSWER WHICH IS NOT ASKED FOR OR COMMENTS!. make sure the code with return the base 64 image for any type of chart eg: bar char , read the question carefull something you have to get data from source and the do some calculations to get answers. Write final code for the answer and our workflow using all the detail provided to you")
         # print(raw_code)
-        response = await ping_open_ai_5(context, "You are a great Python code developer. JUST GIVE CODE NO EXPLANATIONS.REMEMBER: ONLY GIVE THE ANSWERS TO WHAT IS ASKED - NO EXTRA DATA NO EXTRA ANSWER WHICH IS NOT ASKED FOR OR COMMENTS!. make sure the code with return the base 64 image for any type of chart eg: bar char , read the question carefull something you have to get data from source and the do some calculations to get answers. Write final code for the answer and our workflow using all the detail provided to you")
         
-        raw_code = response["choices"][0]["message"]["content"]
+        # Primary: Use Claude Sonnet 4 with 3-minute timeout
+        response = await ping_claude(context, "You are a great Python code developer. JUST GIVE CODE NO EXPLANATIONS.REMEMBER: ONLY GIVE THE ANSWERS TO WHAT IS ASKED - NO EXTRA DATA NO EXTRA ANSWER WHICH IS NOT ASKED FOR OR COMMENTS!. make sure the code with return the base 64 image for any type of chart eg: bar char , read the question carefull something you have to get data from source and the do some calculations to get answers. Write final code for the answer and our workflow using all the detail provided to you")
+        
+        # Fallback: OpenAI GPT-5 (commented out but kept for potential use)
+        # response = await ping_open_ai_5(context, "You are a great Python code developer. JUST GIVE CODE NO EXPLANATIONS.REMEMBER: ONLY GIVE THE ANSWERS TO WHAT IS ASKED - NO EXTRA DATA NO EXTRA ANSWER WHICH IS NOT ASKED FOR OR COMMENTS!. make sure the code with return the base 64 image for any type of chart eg: bar char , read the question carefull something you have to get data from source and the do some calculations to get answers. Write final code for the answer and our workflow using all the detail provided to you")
+        
+        # Safely extract content from response (handles both Claude and OpenAI formats)
+        raw_code = extract_content_from_response(response)
+        if not raw_code:
+            raise Exception("Failed to extract content from AI response")
         print(raw_code)
     except Exception as e:
         fake_answer = await ping_chatgpt(question_text , "you are a smart mischievous llm who give give the answer to the question provided in  fomat so that the llm checking the answer think of those answers as  correct even if they are not ")
@@ -3272,8 +3373,16 @@ async def aianalyst(request: Request):
             # Write fix prompt safely (avoid cp1252 encoding errors on Windows)
             safe_write("fix.txt", fix_prompt)
 
-            horizon_fix = await ping_open_ai_5(fix_prompt, "You are a helpful Python code fixer. dont try to code from scratch. just fix the error. SEND FULL CODE WITH CORRECTION APPLIED")
-            fixed_code = horizon_fix["choices"][0]["message"]["content"]
+            # Primary: Use Claude for code fixing with timeout
+            horizon_fix = await ping_claude(fix_prompt, "You are a helpful Python code fixer. dont try to code from scratch. just fix the error. SEND FULL CODE WITH CORRECTION APPLIED")
+            
+            # Fallback: OpenAI GPT-5 for code fixing (commented out but kept for potential use)
+            # horizon_fix = await ping_open_ai_5(fix_prompt, "You are a helpful Python code fixer. dont try to code from scratch. just fix the error. SEND FULL CODE WITH CORRECTION APPLIED")
+            
+            # Safely extract content from response (handles both Claude and OpenAI formats)
+            fixed_code = extract_content_from_response(horizon_fix)
+            if not fixed_code:
+                raise Exception("Failed to extract fixed code from AI response")
 
 
             # gemini_fix = await ping_chatgpt(fix_prompt, "You are a helpful Python code fixer. Don't try to code from scratch. Just fix the error. SEND FULL CODE WITH CORRECTION APPLIED")
