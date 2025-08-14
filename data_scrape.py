@@ -2256,3 +2256,533 @@ class DataScraper:
     def _clean_generic_numeric_column(self, series: pd.Series) -> pd.Series:
         """Clean generic numeric values - delegates to NumericFieldFormatter"""
         return self.numeric_formatter._clean_generic_numeric_column(series)
+
+
+# ============================================================================
+# ENHANCED SCRAPING CAPABILITIES - QUESTION-AWARE EXTRACTION
+# ============================================================================
+
+class QuestionAnalyzer:
+    """Lightweight question analyzer for determining extraction focus"""
+    
+    def __init__(self):
+        # Keep lists small for memory efficiency
+        self.financial_keywords = ['revenue', 'profit', 'earnings', 'sales', 'price', 'cost']
+        self.sports_keywords = ['score', 'match', 'game', 'player', 'team', 'statistics']
+        self.temporal_keywords = ['quarterly', 'annual', 'monthly', 'latest', 'recent']
+        self.comparison_keywords = ['compare', 'vs', 'versus', 'difference']
+    
+    def analyze_question(self, question: str) -> Dict[str, Any]:
+        """Quick analysis of question to guide extraction - memory efficient"""
+        if not question:
+            return {"domain": "general", "keywords": [], "intent": "general"}
+        
+        question_lower = question.lower()
+        
+        # Extract key information efficiently
+        keywords = [word for word in question_lower.split() 
+                   if len(word) > 2 and word not in {'the', 'and', 'for', 'are', 'what', 'how'}][:10]  # Limit to 10 keywords
+        
+        # Determine domain
+        domain = "general"
+        if any(kw in question_lower for kw in self.financial_keywords):
+            domain = "finance"
+        elif any(kw in question_lower for kw in self.sports_keywords):
+            domain = "sports"
+        
+        # Determine intent
+        intent = "information"
+        if any(kw in question_lower for kw in self.comparison_keywords):
+            intent = "comparison"
+        elif "latest" in question_lower or "recent" in question_lower:
+            intent = "current_data"
+        
+        return {
+            "domain": domain,
+            "keywords": keywords,
+            "intent": intent,
+            "has_temporal": any(kw in question_lower for kw in self.temporal_keywords)
+        }
+
+class EnhancedContentExtractor:
+    """Memory-efficient enhanced content extractor"""
+    
+    def __init__(self):
+        self.question_analyzer = QuestionAnalyzer()
+    
+    def extract_relevant_content(self, html_content: str, question: str = "", max_sources: int = 3) -> List[Dict[str, Any]]:
+        """
+        Extract only the most relevant content sources - memory efficient
+        Returns list of content dictionaries instead of storing all in memory
+        """
+        if not html_content:
+            return []
+        
+        soup = BeautifulSoup(html_content, 'html.parser')
+        question_analysis = self.question_analyzer.analyze_question(question)
+        
+        content_sources = []
+        
+        # Extract and score content sources on-the-fly
+        # 1. HTML Tables (existing functionality enhanced)
+        tables = self._extract_relevant_tables(soup, question_analysis, max_tables=max_sources)
+        content_sources.extend(tables)
+        
+        # 2. Only extract other content types if we have space and question suggests it
+        if len(content_sources) < max_sources:
+            # Card layouts for product/item data
+            if question_analysis["domain"] in ["general", "finance"] or "price" in question_analysis["keywords"]:
+                cards = self._extract_card_data(soup, question_analysis, max_cards=max_sources - len(content_sources))
+                content_sources.extend(cards)
+        
+        if len(content_sources) < max_sources:
+            # JSON-LD for structured data
+            json_data = self._extract_json_ld(soup, question_analysis, max_items=max_sources - len(content_sources))
+            content_sources.extend(json_data)
+        
+        if len(content_sources) < max_sources:
+            # Key-value pairs from text
+            kv_pairs = self._extract_key_value_text(soup, question_analysis)
+            if kv_pairs:
+                content_sources.append(kv_pairs)
+        
+        # Sort by relevance and return top results
+        content_sources.sort(key=lambda x: x.get('relevance_score', 0), reverse=True)
+        return content_sources[:max_sources]
+    
+    def _extract_relevant_tables(self, soup: BeautifulSoup, question_analysis: Dict, max_tables: int = 3) -> List[Dict[str, Any]]:
+        """Extract and score HTML tables for relevance"""
+        tables = soup.find_all('table')
+        relevant_tables = []
+        
+        for i, table in enumerate(tables[:10]):  # Limit processing to first 10 tables for memory
+            try:
+                # Quick relevance check before expensive DataFrame conversion
+                table_text = table.get_text().lower()
+                
+                # Skip clearly irrelevant tables
+                if self._is_navigation_table(table, table_text):
+                    continue
+                
+                # Convert to DataFrame only if it passes initial checks
+                df = self._table_to_dataframe_efficient(table)
+                if df is None or df.empty or len(df) < 2:
+                    continue
+                
+                # Score relevance
+                relevance_score = self._score_table_relevance(df, table_text, question_analysis)
+                
+                if relevance_score > 0.2:  # Only keep tables with decent relevance
+                    relevant_tables.append({
+                        "content_type": "table",
+                        "content": df,
+                        "relevance_score": relevance_score,
+                        "source_info": f"table_{i}",
+                        "metadata": {
+                            "rows": len(df),
+                            "columns": len(df.columns),
+                            "table_classes": table.get('class', [])
+                        }
+                    })
+                
+                # Clean up immediately to save memory
+                del df
+                
+                if len(relevant_tables) >= max_tables:
+                    break
+                    
+            except Exception as e:
+                print(f"Error processing table {i}: {e}")
+                continue
+        
+        return relevant_tables
+    
+    def _extract_card_data(self, soup: BeautifulSoup, question_analysis: Dict, max_cards: int = 2) -> List[Dict[str, Any]]:
+        """Extract data from card layouts - memory efficient"""
+        card_selectors = ['.card', '[class*="card"]', '.product', '[class*="item"]']
+        
+        for selector in card_selectors:
+            cards = soup.select(selector)
+            if len(cards) >= 3:  # Only process if we have multiple cards
+                try:
+                    # Limit processing to avoid memory overload
+                    cards_to_process = cards[:20]  # Max 20 cards
+                    
+                    card_data = []
+                    for card in cards_to_process:
+                        data = self._extract_card_info(card)
+                        if data:
+                            card_data.append(data)
+                    
+                    if len(card_data) >= 2:
+                        df = pd.DataFrame(card_data)
+                        relevance_score = self._score_content_relevance(df, question_analysis)
+                        
+                        if relevance_score > 0.1:
+                            return [{
+                                "content_type": "cards",
+                                "content": df,
+                                "relevance_score": relevance_score,
+                                "source_info": f"cards_{selector}",
+                                "metadata": {"card_count": len(card_data)}
+                            }]
+                
+                except Exception as e:
+                    print(f"Error processing cards {selector}: {e}")
+                    continue
+        
+        return []
+    
+    def _extract_json_ld(self, soup: BeautifulSoup, question_analysis: Dict, max_items: int = 2) -> List[Dict[str, Any]]:
+        """Extract JSON-LD structured data - memory efficient"""
+        json_scripts = soup.find_all('script', type='application/ld+json')
+        json_sources = []
+        
+        for i, script in enumerate(json_scripts[:5]):  # Limit to first 5 JSON-LD scripts
+            try:
+                json_data = json.loads(script.string)
+                
+                # Convert to DataFrame efficiently
+                if isinstance(json_data, list):
+                    df = pd.json_normalize(json_data[:10])  # Limit to 10 items
+                elif isinstance(json_data, dict):
+                    df = pd.json_normalize([json_data])
+                else:
+                    continue
+                
+                if not df.empty:
+                    relevance_score = self._score_content_relevance(df, question_analysis)
+                    
+                    if relevance_score > 0.1:
+                        json_sources.append({
+                            "content_type": "json_ld",
+                            "content": df,
+                            "relevance_score": relevance_score,
+                            "source_info": f"json_ld_{i}",
+                            "metadata": {"json_type": json_data.get('@type', 'Unknown')}
+                        })
+                
+                if len(json_sources) >= max_items:
+                    break
+                    
+            except Exception as e:
+                print(f"Error processing JSON-LD {i}: {e}")
+                continue
+        
+        return json_sources
+    
+    def _extract_key_value_text(self, soup: BeautifulSoup, question_analysis: Dict) -> Optional[Dict[str, Any]]:
+        """Extract key-value pairs from text - lightweight"""
+        text_content = soup.get_text()
+        
+        # Pattern for key-value pairs (limit search to avoid memory issues)
+        kv_pattern = r'([A-Za-z][A-Za-z\s]{2,30}):\s*([^\n\r]{1,100})'
+        matches = re.findall(kv_pattern, text_content)
+        
+        if len(matches) >= 3:  # Only if we found multiple pairs
+            # Limit to first 20 matches to avoid memory overload
+            limited_matches = matches[:20]
+            
+            try:
+                df = pd.DataFrame(limited_matches, columns=['Key', 'Value'])
+                relevance_score = self._score_content_relevance(df, question_analysis)
+                
+                if relevance_score > 0.1:
+                    return {
+                        "content_type": "key_value",
+                        "content": df,
+                        "relevance_score": relevance_score,
+                        "source_info": "text_kv_pairs",
+                        "metadata": {"pair_count": len(limited_matches)}
+                    }
+            except Exception as e:
+                print(f"Error processing key-value pairs: {e}")
+        
+        return None
+    
+    def _table_to_dataframe_efficient(self, table) -> Optional[pd.DataFrame]:
+        """Memory-efficient table to DataFrame conversion"""
+        try:
+            rows = table.find_all('tr')
+            if not rows or len(rows) > 100:  # Skip very large tables to save memory
+                return None
+            
+            # Get headers efficiently
+            first_row = rows[0]
+            headers = [cell.get_text().strip() for cell in first_row.find_all(['th', 'td'])]
+            
+            # Get data rows (limit to 50 rows for memory efficiency)
+            data = []
+            data_rows = rows[1:] if headers else rows
+            for row in data_rows[:50]:  # Limit rows
+                row_data = [cell.get_text().strip() for cell in row.find_all(['td', 'th'])]
+                if row_data and len(row_data) <= 20:  # Limit columns too
+                    data.append(row_data)
+            
+            if not data:
+                return None
+            
+            # Create DataFrame with proper column handling
+            max_cols = max(len(row) for row in data) if data else 0
+            if headers and len(headers) >= max_cols:
+                df = pd.DataFrame(data, columns=headers[:max_cols])
+            else:
+                df = pd.DataFrame(data)
+            
+            return df if not df.empty else None
+            
+        except Exception as e:
+            print(f"Error converting table to DataFrame: {e}")
+            return None
+    
+    def _extract_card_info(self, card) -> Optional[Dict[str, Any]]:
+        """Extract info from a single card - memory efficient"""
+        try:
+            card_data = {}
+            
+            # Get title
+            title_elem = card.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', '.title'])
+            if title_elem:
+                card_data['title'] = title_elem.get_text().strip()[:100]  # Limit length
+            
+            # Get price
+            price_elem = card.find(['span', 'div'], string=re.compile(r'[\$€£¥]')) or \
+                        card.find(['span', 'div'], class_=re.compile(r'price'))
+            if price_elem:
+                card_data['price'] = price_elem.get_text().strip()[:50]
+            
+            # Get first number found (could be rating, count, etc.)
+            numbers = re.findall(r'\d+(?:\.\d+)?', card.get_text())
+            if numbers:
+                card_data['numeric_value'] = numbers[0]
+            
+            # Only return if we found useful data
+            return card_data if len(card_data) > 1 else None
+            
+        except Exception:
+            return None
+    
+    def _is_navigation_table(self, table, table_text: str) -> bool:
+        """Quick check to skip navigation tables"""
+        nav_indicators = ['home', 'about', 'contact', 'menu', 'navigation', 'footer', 'header']
+        return (len(table_text) < 100 and 
+                any(indicator in table_text for indicator in nav_indicators))
+    
+    def _score_table_relevance(self, df: pd.DataFrame, table_text: str, question_analysis: Dict) -> float:
+        """Quick relevance scoring for tables"""
+        if not question_analysis or not question_analysis.get("keywords"):
+            return 0.5  # Default score
+        
+        score = 0.0
+        content_text = (table_text + ' ' + ' '.join(df.columns)).lower()
+        
+        # Keyword matching (simplified)
+        keywords = question_analysis.get("keywords", [])
+        if keywords:
+            matches = sum(1 for kw in keywords if kw in content_text)
+            score += (matches / len(keywords)) * 0.6
+        
+        # Domain bonus
+        domain = question_analysis.get("domain", "general")
+        if domain == "finance":
+            financial_terms = ['revenue', 'profit', 'price', '$', '%']
+            if any(term in content_text for term in financial_terms):
+                score += 0.3
+        elif domain == "sports":
+            sports_terms = ['score', 'points', 'match', 'player']
+            if any(term in content_text for term in sports_terms):
+                score += 0.3
+        
+        # Table size bonus (prefer substantial tables)
+        if len(df) > 3 and len(df.columns) > 2:
+            score += 0.1
+        
+        return min(1.0, score)
+    
+    def _score_content_relevance(self, df: pd.DataFrame, question_analysis: Dict) -> float:
+        """Quick relevance scoring for any content"""
+        if not question_analysis or not question_analysis.get("keywords"):
+            return 0.3
+        
+        content_text = ' '.join([str(val) for val in df.values.flatten()]).lower()
+        keywords = question_analysis.get("keywords", [])
+        
+        if keywords:
+            matches = sum(1 for kw in keywords if kw in content_text)
+            return min(0.8, (matches / len(keywords)) * 0.7)
+        
+        return 0.3
+
+
+class EnhancedWebScraper(ImprovedWebScraper):
+    """
+    Enhanced version of ImprovedWebScraper with question-aware capabilities
+    Extends existing functionality without breaking anything
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.enhanced_extractor = EnhancedContentExtractor()
+    
+    async def extract_data_with_question(self, source_config: Dict[str, Any], question: str = "") -> Dict[str, Any]:
+        """
+        Enhanced data extraction guided by question
+        Falls back to original method if enhanced extraction fails
+        """
+        try:
+            # If it's a URL, handle it with question awareness
+            if isinstance(source_config, str) or source_config.get('url'):
+                url = source_config if isinstance(source_config, str) else source_config.get('url')
+                return await self._extract_from_url_with_question(url, question)
+            else:
+                # Fall back to original method for non-URL sources
+                return await super().extract_data(source_config)
+                
+        except Exception as e:
+            print(f"Enhanced extraction failed, falling back to original: {e}")
+            return await super().extract_data(source_config)
+    
+    async def _extract_from_url_with_question(self, url: str, question: str) -> Dict[str, Any]:
+        """Extract data from URL with question guidance"""
+        print(f"🎯 Enhanced extraction for: {question[:50]}..." if question else "🔍 Enhanced extraction (no question)")
+        
+        try:
+            # Get HTML content using existing smart fetch
+            html_content = await self._smart_fetch_webpage(url)
+            
+            if not question:
+                # No question provided, fall back to original table extraction
+                print("No question provided, using original table extraction")
+                df = await self.web_scraper.extract_table_from_html(html_content)
+                if df is None or df.empty:
+                    return {"success": False, "message": "No tables found"}
+                
+                # Apply numeric formatting
+                cleaned_df, formatting_results = await self.numeric_formatter.format_dataframe_numerics(df)
+                
+                return {
+                    "success": True,
+                    "source_url": url,
+                    "extraction_method": "original_table_extraction",
+                    "final_data": cleaned_df,
+                    "shape": cleaned_df.shape,
+                    "columns": list(cleaned_df.columns),
+                    "numeric_formatting": formatting_results
+                }
+            
+            # Extract relevant content using enhanced method
+            content_sources = self.enhanced_extractor.extract_relevant_content(html_content, question, max_sources=3)
+            
+            if not content_sources:
+                print("No relevant content found with enhanced method, trying original")
+                # Fall back to original method
+                df = await self.web_scraper.extract_table_from_html(html_content)
+                if df is None or df.empty:
+                    return {"success": False, "message": "No relevant content found"}
+                
+                cleaned_df, formatting_results = await self.numeric_formatter.format_dataframe_numerics(df)
+                return {
+                    "success": True,
+                    "source_url": url,
+                    "extraction_method": "fallback_table_extraction",
+                    "final_data": cleaned_df,
+                    "shape": cleaned_df.shape,
+                    "columns": list(cleaned_df.columns),
+                    "numeric_formatting": formatting_results
+                }
+            
+            # Combine the most relevant sources
+            best_source = content_sources[0]  # Top relevance
+            final_df = best_source["content"]
+            
+            # Apply numeric formatting to final DataFrame
+            cleaned_df, formatting_results = await self.numeric_formatter.format_dataframe_numerics(final_df)
+            
+            # Prepare additional sources info (without storing full DataFrames)
+            additional_sources = []
+            for source in content_sources[1:]:
+                additional_sources.append({
+                    "content_type": source["content_type"],
+                    "relevance_score": source["relevance_score"],
+                    "shape": source["content"].shape,
+                    "source_info": source["source_info"]
+                })
+            
+            print(f"✅ Enhanced extraction found {len(content_sources)} relevant sources")
+            print(f"📊 Using best source: {best_source['content_type']} (relevance: {best_source['relevance_score']:.3f})")
+            
+            return {
+                "success": True,
+                "source_url": url,
+                "question": question,
+                "extraction_method": "enhanced_question_aware",
+                "final_data": cleaned_df,
+                "shape": cleaned_df.shape,
+                "columns": list(cleaned_df.columns),
+                "best_source_type": best_source["content_type"],
+                "best_source_relevance": best_source["relevance_score"],
+                "total_sources_found": len(content_sources),
+                "additional_sources": additional_sources,
+                "numeric_formatting": formatting_results
+            }
+            
+        except Exception as e:
+            print(f"Error in enhanced extraction: {e}")
+            # Final fallback to original method
+            return await super().extract_data(url)
+    
+    async def get_relevant_tables_only(self, url: str, question: str, max_tables: int = 3) -> Dict[str, Any]:
+        """
+        Get only tables relevant to the question - memory efficient
+        """
+        try:
+            html_content = await self._smart_fetch_webpage(url)
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            question_analysis = self.enhanced_extractor.question_analyzer.analyze_question(question)
+            relevant_tables = self.enhanced_extractor._extract_relevant_tables(soup, question_analysis, max_tables)
+            
+            if not relevant_tables:
+                return {
+                    "success": False,
+                    "message": "No relevant tables found",
+                    "question": question,
+                    "tables_found": 0
+                }
+            
+            # Process each table and apply numeric formatting
+            processed_tables = []
+            for i, table_source in enumerate(relevant_tables):
+                df = table_source["content"]
+                cleaned_df, formatting_results = await self.numeric_formatter.format_dataframe_numerics(df)
+                
+                table_info = {
+                    "table_number": i + 1,
+                    "content_type": table_source["content_type"],
+                    "relevance_score": table_source["relevance_score"],
+                    "data": cleaned_df,
+                    "shape": cleaned_df.shape,
+                    "columns": list(cleaned_df.columns),
+                    "source_info": table_source["source_info"],
+                    "metadata": table_source["metadata"],
+                    "numeric_formatting": formatting_results
+                }
+                processed_tables.append(table_info)
+            
+            return {
+                "success": True,
+                "source_url": url,
+                "question": question,
+                "tables_found": len(processed_tables),
+                "relevant_tables": processed_tables,
+                "message": f"Found {len(processed_tables)} relevant tables"
+            }
+            
+        except Exception as e:
+            print(f"Error getting relevant tables: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "question": question,
+                "tables_found": 0
+            }
